@@ -1,0 +1,1260 @@
+<!DOCTYPE html>
+<html>
+<head>
+	<title>agar22</title>
+	<style>
+		
+		body {
+			padding: 0;
+			margin: 0;
+			overflow: hidden;
+			font-family: Arial;
+			color: #fff;
+		}
+		* {
+			box-sizing: border-box;
+		}
+		#debug-dialog {
+			position: absolute;
+			top: 0;
+			left: 0;
+			margin: 5px;
+			padding: 0 5px 5px 5px;
+			width: -webkit-fill-available;
+			display: none;
+			background: rgba(0, 0, 0, 0.6);
+			font-size: 14px;
+			font-weight: 700;
+			text-shadow: 0 1px 3px #111;
+		}
+		#debug-logs {
+			padding: 0 5px;
+			font-size: 12px;
+		}
+		#debug-input {
+			margin-top: 3px;
+			border: 2px solid #111;
+			font-size: 12px;
+			font-weight: 700;
+			font-family: inherit;
+			outline: 0;
+			width: 100%;
+		}
+		pre {
+			margin: 0;
+			padding: 0;
+		}
+	</style>
+</head>
+<body>
+	<canvas id='mainCanvas'></canvas>
+	<div id="debug-dialog">
+		<span>Console:</span>
+		<input type="text" id="debug-input">
+		<div id="debug-logs">
+		</div>
+	</div>
+	<script>
+		const mainCanvas = document.getElementById('mainCanvas')
+		const mainCtx = mainCanvas.getContext('2d')
+		let mainWidth,
+			mainHeight
+
+		const onResize = () => {
+			mainWidth = innerWidth
+			mainHeight = innerHeight
+			mainCanvas.width = mainWidth
+			mainCanvas.height = mainHeight
+		}
+		onResize()
+		window.onresize = onResize
+
+		let gameSize = 5000,
+			leftPos = 0,
+			rightPos = leftPos + gameSize,
+			topPos = 0,
+			bottomPos = topPos + gameSize
+
+		let baseWidth = 1920,
+			baseHeight = 1080
+
+		const X = gameSize / 2,
+			Y = gameSize / 2 
+
+		let viewZoom = 1,
+			smoothRender = 0.8,
+			xDraw = X,
+			yDraw = Y,
+			drawOffset = 5
+
+		let timestamp = 0,
+			oldtimestamp = 0,
+			deltatime = 0
+
+		const rectangleCollision = (a, b) => {
+			return a.x < b.x + b.w && a.x + a.w > b.x && 
+				a.y < b.y + b.h && a.y + a.h > b.y
+		}
+
+		let maxChildren = 4,
+			maxDepth = 20
+
+		const savedSkins = {}
+		const getSkin = (nickname, callback) => {
+			nickname = nickname.toLowerCase().split(' ').join('-')
+			if(savedSkins[nickname] && savedSkins[nickname] != 'not found') return callback(true, savedSkins[nickname])
+			if(savedSkins[nickname] == 'not found') return
+
+			let skin = new Image()
+			skin.onload = () => { callback(true, skin) && (savedSkins[nickname] = skin) }
+			skin.onerror = (e) => { callback(false) && (savedSkins[nickname] = 'not found') }
+			skin.src = `https://www.skinsagario.com/wp-content/uploads/2015/07/${nickname}-300x300.png`
+		}
+
+
+		class Cell {
+			constructor(owner, x, y, mass, hue) {
+				this.id = Math.random() 
+				this.owner = owner
+				this.x = x
+				this.y = y
+				this.setMass(mass)
+				this.setColor(hue)
+				this.setBoost(0, 0, 0)
+				this.setSkin(null)
+				this.setNickname(null)
+				this.isFood = false
+				this.isVirus = false
+				this.isEject = false
+				this.isAgitated = false
+				this.isPlayer = false
+				this.points = []
+				this.pointsAcc = []
+				this.splitTimestamp = 0
+			}
+			setBoost(x, y, speed) {
+				this.dxBoost = x
+				this.dyBoost = y
+				this.xBoost = x * speed
+				this.yBoost = y * speed
+				this.boostSpeed = speed
+				this.boostCounter = 0
+			}
+			move(dt) {
+				this.x += this.xBoost * dt
+				this.y += this.yBoost * dt
+				let f = Math.min(1, 0.05 * Math.min(dt/40, 1))
+				this.xBoost -= this.xBoost * f
+				this.yBoost -= this.yBoost * f
+				Math.hypot(this.xBoost, this.yBoost) < 0.01 && (this.xBoost = 0) && (this.yBoost = 0)
+			}
+			setSkin(imgObject) {
+				this.skin = imgObject
+			}
+			setNickname(nickname) {
+				if(nickname == null || nickname.trim().length == 0) {
+					return false
+				}
+				getSkin(nickname, (exists, skin) => exists ? this.setSkin(skin) : this.setSkin(null))
+				this.nickname = nickname
+				let s = this.getNameSize()
+				this.nicknameCache = text(nickname, {
+					fontsize: s
+				})
+			}
+			setMass(mass) {
+				this.mass = mass
+				this.radius = Math.pow(mass * 100, 0.5)
+				this.size = this.radius
+			}
+			setColor(hue) {
+				if(hue == undefined) {
+					hue = Math.floor(Math.random() * 361)
+				}
+				this.hue = hue
+				this.fillColor = `hsl(${hue}, 100%, 51%)`
+				this.strokeColor = `hsl(${hue}, 100%, 46%)`
+			}
+			getBoostSpeed() {
+				return this.getSpeed() * 5
+			}
+			getSpeed() {
+				let base = 0.4
+				return base * 2.2 * Math.pow(this.size, -0.397)
+			}
+			getNameSize() {
+				return Math.max(24, Math.floor(this.size * 0.5))
+			}
+			split(mass) {
+				if(this.mass - mass < 10) return null
+				this.setMass(this.mass - mass)
+				let q = new Cell(this.owner, this.x, this.y, mass, this.hue)
+				q.splitTimestamp = timestamp
+				return q
+			}
+			getNumPoints() {
+				if(this.isVirus) {
+					return 100
+				} else if(this.isEject) {
+					return 26
+				}
+				var b = this.size
+				b *= Math.min(1, viewZoom)
+				b.isPlayer && (b = Math.max(b, 26))
+				return Math.round(b)
+			}
+			borderCheck() {
+				if(Math.hypot(this.xBoost , this.yBoost ) > 0) {
+					(this.y <= topPos || this.y >= bottomPos) && (this.yBoost *= -1);
+					(this.x <= leftPos || this.x >= rightPos) && (this.xBoost *= -1);
+				}
+				this.x = Math.min(Math.max(leftPos, this.x), rightPos)
+				this.y = Math.min(Math.max(topPos, this.y), bottomPos)
+			}
+			// Taken from Agar's source
+			createPoints() {
+				let samplenum = this.getNumPoints()
+				for(; this.points.length > samplenum;) {
+					let rand = Math.floor(Math.random() * this.points.length)
+					this.points.splice(rand, 1)
+					this.pointsAcc.splice(rand, 1)
+				}
+				if(this.points.length == 0 && samplenum > 0) {
+					this.points.push({
+						ref: this,
+						x: this.x,
+						y: this.y,
+						size: this.size
+					})
+					this.pointsAcc.push(Math.random() - 0.5)
+				}
+				while(this.points.length < samplenum) {
+					let rand = Math.floor(Math.random() * this.points.length)
+					let point = this.points[rand]
+					this.points.splice(rand, 0, {
+						ref: point.ref,
+						size: point.size,
+						x: point.x,
+						y: point.y
+					})
+					this.pointsAcc.splice(rand, 0, this.pointsAcc[rand])
+				}
+			}
+			movePoints() {
+				let nearby = [], t = this.size * 4
+				softbody && qTree.query(new Rectangle(this.x - t/2, this.y - t/2, t, t), (a) => {
+					nearby.push(a)
+				})	
+				this.createPoints()
+				let numpoints = this.points.length
+				let pointsacc = this.pointsAcc
+				for(let i = 0; i < numpoints; i++) {
+					let pos1 = pointsacc[(i - 1 + numpoints) % numpoints]
+					let pos2 = pointsacc[(i + 1) % numpoints]
+					pointsacc[i] += Math.random() - 0.5 
+					pointsacc[i] *= 0.5
+					let bound = 10
+					bound < pointsacc[i] && (pointsacc[i] = bound);
+					-bound > pointsacc[i] && (pointsacc[i] = -bound);
+					pointsacc[i] = (pos1 + pos2 + 8 * pointsacc[i]) / 10
+				}
+				let points = this.points
+				for(let j = 0, isvirus = this.isVirus ? 0 : (timestamp/1E4) % 2 * Math.PI; j < numpoints; j++) {
+					let f = points[j].size
+					let e = points[(j - 1 + numpoints) % numpoints].size
+					let m = points[(j + 1) % numpoints].size
+					if(this.size > 15 && !this.isFood) {
+						let l = false
+						let h = 10
+						let n = points[j].x
+						let q = points[j].y
+						let ref = points[j].ref
+						nearby.forEach(a => {
+							let d = Math.hypot(a.x - n, a.y - q)
+							if(a != ref && d < a.size && d > Math.max(a.size - h, a.size * 0.8)) {
+								l = true
+							}
+						})
+						if (!l && n < leftPos || q < topPos || n > rightPos || q > bottomPos) {
+							l = true
+						}
+						if(l) {
+							if(pointsacc[j] > 0) {
+								pointsacc[j] = 0
+							}
+							pointsacc[j] -= 1 
+						}
+					}
+					f += pointsacc[j]
+					0 > f && (f = 0)
+					f = this.isAgitated ?  (14 * f + this.size) / 15 : (9 * f + this.size) / 10
+					points[j].size = (e + m + 18 * f) / 20
+					e = 2 * Math.PI / numpoints
+					m = points[j].size
+					this.isVirus && 0 == j % 2 && (m += 5)
+					points[j].x = this.x + Math.cos(e * j + isvirus) * m
+					points[j].y = this.y + Math.sin(e * j + isvirus) * m
+				}
+			}
+			// End
+			draw(ctx) {
+				let x = (this.x - xDraw) * viewZoom + mainWidth / 2
+				let y = (this.y - yDraw) * viewZoom + mainHeight / 2
+				let s = this.size
+				if(x < -s || y < -s || x > xDraw + mainWidth - s || y > yDraw + mainHeight - s) return false
+				let b = (!this.isFood && !this.isVirus && viewZoom < 0.1)
+				if(this.isFood && viewZoom < 0.9) b = true
+				ctx.save()
+				ctx.beginPath()
+				if(b || rigid) {
+					ctx.arc(this.x, this.y, this.size, 0, 2 * Math.PI)
+				} else {
+					this.movePoints()
+					ctx.moveTo(this.points[0].x, this.points[0].y)
+					for(let i = 1; i < this.points.length; i++) {
+						ctx.lineTo(this.points[i].x, this.points[i].y)
+					}
+				}
+				ctx.closePath()
+				ctx.fillStyle = !colors ? '#000' :  this.fillColor
+				ctx.strokeStyle = !colors ? '#000' :  this.strokeColor
+				ctx.lineWidth = 10
+				
+				this.isFood == false && ctx.stroke()
+				ctx.fill()
+				ctx.clip()
+				if(this.skin != undefined) {
+					let s = this.size
+					ctx.drawImage(this.skin, this.x - s, this.y - s, s * 2, s * 2)
+				}
+				
+				ctx.restore()
+				if(this.nickname != undefined) {
+					let s1 = this.getNameSize()
+					let s2 = this.nicknameCache.args.fontsize
+					if(Math.abs(s1 - s2) > 5) 
+						this.setNickname(this.nickname) 
+					let { width, height } = this.nicknameCache 
+					let ratio = Math.ceil(10 * viewZoom) / 10
+					ctx.drawImage(this.nicknameCache, 
+						this.x - width/2, this.y - height/2)
+				}
+			}
+			
+		}
+
+		class Food extends Cell {
+			constructor(x, y, mass) {
+				super(null, x, y, mass)
+				this.isFood = true
+			}
+		}
+
+		class Virus extends Cell {
+			constructor(x, y, mass) {
+				super(null, x, y, 60, 93) 
+				this.isVirus = true
+				this.isAgitated = true
+			}
+		}
+
+		class Eject extends Cell {
+			constructor(x, y, mass, hue) {
+				super(null, x, y, mass, hue)
+				this.isEject = true
+			}
+		}
+
+		
+
+		class Player {
+			constructor(nickname) {
+				this.cells = []
+				this.xCenter = X
+				this.yCenter = Y
+				this.totalRadius = 0
+				this.totalMass = 0
+				this.viewWidth = baseWidth
+				this.viewHeight = baseHeight
+				this.setNickname(nickname)
+				this.setMouse(this.xCenter, this.yCenter)
+			}
+			setNickname(nickname) {
+				this.nickname = nickname
+				if(this.cells.length > 0) {
+					for(let k = 0; k < this.cells.length; k++) this.cells[k].setNickname(nickname)
+				}
+			}
+			setMouse(x, y) {
+				this.xMouse = x 
+				this.yMouse = y
+			}
+			addCell(cell) {
+				if(this.cells.length == 0) {
+					this.hue = cell.hue
+				} else {
+					cell.setColor(this.hue)
+				}
+				cell.setNickname(this.nickname)
+				cell.isPlayer = true
+				this.cells.push(cell)
+			}
+			updateCenter() {
+				const length = this.cells.length
+				if(length == 0) return false
+				this.xCenter = this.cells.map(cell => cell.x).reduce((a, b) => a + b) / length
+				this.yCenter = this.cells.map(cell => cell.y).reduce((a, b) => a + b) / length
+				this.totalRadius = this.cells.map(cell => cell.radius).reduce((a, b) => a + b)
+				this.totalMass = this.cells.map(cell => cell.mass).reduce((a, b) => a + b)
+				let f = 1 / Math.pow(Math.min(64 / this.totalRadius, 1), 0.4)
+				this.viewWidth = baseWidth * f
+				this.viewHeight = baseHeight * f
+			}
+			ejectCells() {
+				for(let i = 0; i < this.cells.length; i++) {
+					let g = this.cells[i]
+					if(g.mass < 15) continue
+					let { xNormal, yNormal, distance} = getVectorData(this.xMouse + (this.xCenter - g.x) * viewZoom, this.yMouse + (this.yCenter - g.y) * viewZoom)
+					let e = new Eject(g.x + xNormal * g.size, g.y + yNormal * g.size, 5, this.hue)
+					e.setBoost(xNormal, yNormal, e.getBoostSpeed() * 0.4)
+					g.setMass(g.mass - 5)
+					addCell(e)
+				}
+			}
+			splitCells() {
+				let numCells = this.cells.length
+				if(numCells >= 16) {
+					return false
+				}
+				for(let i = 0; i < numCells; i++) {
+					if(this.cells.length >= 16) break
+					let g = this.cells[i].split(this.cells[i].mass/2)
+					if(g == undefined) continue
+					let { xNormal, yNormal, distance} = getVectorData(this.xMouse + (this.xCenter - g.x) * viewZoom, this.yMouse + (this.yCenter - g.y) * viewZoom)
+					let f = Math.max(0.6, Math.min(distance/300, 1))
+					g.setBoost(xNormal, yNormal, g.getBoostSpeed() * f)
+					this.addCell(g)
+					addCell(g)
+				}
+			}
+			moveCells(dt) {
+				for(let i = this.cells.length - 1; i >= 0; i--) {
+					let e = this.cells[i]
+					let s = viewZoom
+					let { xNormal, yNormal, distance} = getVectorData(this.xMouse + (this.xCenter - e.x) * s, this.yMouse + (this.yCenter - e.y) * s)
+					let speed = e.getSpeed()
+					let f = Math.min(1, Math.pow(distance / 40, 2))
+					e.x += xNormal * speed * dt * f
+					e.y += yNormal * speed * dt * f
+					let decay = e.mass - e.mass * 0.05 * dt / 2000
+					e.setMass(Math.max(10, decay))
+					if(e.mass >= 9E3) {
+						let u = e.split(e.mass/2)
+						this.addCell(u)
+						addCell(u)
+					}
+
+					for(let j = this.cells.length - 1; j >= 0; j--) {
+						if(j === i) continue
+						let a = this.cells[j]
+						let collisionData = getCellCollisionData(e, a)
+						if(collisionData) {
+							if(timestamp - e.splitTimestamp > e.mass * 0.3 * + 30 * 1E3 && 
+								timestamp - a.splitTimestamp > a.mass * 0.3 + 30 * 1E3) {
+								if(canEat(collisionData, true)) {
+									e.setMass(e.mass + a.mass)
+									// this.cells.splice(j, 1)
+									removeCell(a)
+								}
+							} else {
+								resolveCellCollision(collisionData, dt)
+							}
+							
+						}
+					}
+				}
+			}
+		}
+
+		
+		class Bot extends Player {
+			constructor(nickname) {
+				super(nickname)
+				this.currentAngle = Math.random() * 2 * Math.PI
+			}
+			autoInput() {
+				let nearby = []
+				qTree.query(new Rectangle(this.xCenter, this.yCenter, this.viewWidth, this.viewHeight), (a) => {
+					this.cells.indexOf(a) == -1 && nearby.push(a)
+				})
+				for(let i = 0; i < this.cells.length; i++) {
+					let cell = this.cells[i]
+					if(cell.x <= leftPos || cell.y <= topPos || cell.y >= bottomPos || cell.x >= rightPos) {
+						this.currentAngle = Math.random() * 2 * Math.PI
+						break
+					}
+					for(let j = 0; j < nearby.length; j++) {
+						let a = nearby[j]
+						let { distance, angle } = getVectorData(a.x - cell.x, a.y - cell.y)
+						let rand = Math.random()
+						let f = (0.5 + rand * 0.5) 
+						if(distance < a.size * 2 && a.mass > cell.mass * 1.25 && !a.isVirus) {
+							this.currentAngle = angle * -f
+						} else if(distance < cell.size * 2 && a.mass * 1.25 <= cell.mass && !a.isVirus) {
+							this.currentAngle = angle
+						}
+					}
+				}
+				let x = Math.cos(this.currentAngle) * 300 * viewZoom
+				let y = Math.sin(this.currentAngle) * 300 * viewZoom
+				this.setMouse(x, y)
+			}
+		}
+
+
+		class Rectangle {
+			constructor(x, y, w, h) {
+				this.x = x
+				this.y = y
+				this.w = w
+				this.h = h
+			}
+		}
+
+		class Quadtree extends Rectangle {
+			constructor(x, y, w, h, depth, parent) {
+				super(x, y, w, h)
+				this.parent = parent
+				this.depth = depth || 0
+				this.items = []
+				this.nodes = []
+			}
+			query(range, callback) {
+				if(rectangleCollision(this, range)) {
+					for(let i = 0; i < this.items.length; i++) callback(this.items[i])
+					if(0 !== this.nodes.length) {
+						for(let j = 0; j < this.nodes.length; j++) {
+							this.nodes[j].query(range, callback)
+						}
+					}
+				}
+			}
+			retrieve(a, callback) {
+				for(let i = 0; i < this.items.length; i++) callback(this.items[i])
+				if(0 !== this.nodes.length) {
+					this.nodes[this.findInsertNode(a)].retrieve(a, callback)
+				}
+			}
+			findInsertNode(a) {
+				return a.x < this.x + this.w / 2 ? 
+					(a.y < this.y + this.h / 2 ? 0 : 2) : (a.y >= this.y + this.h / 2 ? 3 : 1)
+			}
+			insert(a, callback) {
+				if(this.nodes.length != 0) {
+					this.nodes[this.findInsertNode(a)].insert(a)
+				} else {
+					if(this.items.length >= maxChildren && this.depth < maxDepth) {
+						this.divide()
+						this.nodes[this.findInsertNode(a)].insert(a)
+					} else {
+						this.items.push(a)
+						callback && callback(this)
+						a.node = this
+					}
+				}
+			}
+			getItems() {
+				let items = []
+				this.query(this, (a) => items.push(a))
+				return items
+			}
+			divide() {
+				let a = this.depth + 1
+				let c = this.w / 2
+				let d = this.h / 2
+				this.nodes.push(new Quadtree(this.x, this.y, c, d, a, this))
+				this.nodes.push(new Quadtree(this.x + c, this.y, c, d, a, this))
+				this.nodes.push(new Quadtree(this.x, this.y + d, c, d, a, this))
+				this.nodes.push(new Quadtree(this.x + c, this.y + d, c, d, a, this))
+				a = this.items
+				this.items = []
+				for(c = 0; c < a.length; c++) this.insert(a[c])
+			}
+			clear() {
+				for (var a = 0; a < this.nodes.length; a++) this.nodes[a].clear()
+				this.items.length = 0
+				this.nodes.length = 0
+			}	
+			draw(ctx, range) {
+				ctx.lineWidth = this.w > 40 ? 2 : 1 
+				ctx.strokeStyle = '#111'
+				ctx.strokeRect(this.x, this.y, this.w, this.h)
+				if(this.nodes.length == 0 && this.w > 40) {
+					let length = this.items.length
+					if(!this.numCache || this.numCache.number != length) {
+						this.numCache = text(length, { 
+							fontsize: Math.min(76, this.h * 0.5), 
+							strokeSize: 5 
+						})
+						this.numCache.number = length
+					}
+					ctx.drawImage(this.numCache, this.x + this.w / 2 - this.numCache.width / 2, 
+						this.y + this.h / 2 - this.numCache.height / 2)
+				}
+				for(let i = 0; i < this.nodes.length; i++) {
+					this.nodes[i].draw(ctx)
+				}
+			}
+		}
+
+		const virusSplit = (cell) => {
+			let n = cell.owner.cells.length
+			if(n >= 16) return 
+			let q = 16 - n
+
+			let mass = cell.mass * 0.6
+			while(mass >= 0) {
+				if(cell.owner.cells.length >= 16) 
+					break
+
+				let a = Math.random() * Math.PI * 2
+
+				let m = Math.max(10, mass * 0.4)
+				mass -= m
+
+				let x = cell.split(m)
+				if(!x) continue
+				x.setBoost(Math.cos(a), Math.sin(a), x.getBoostSpeed())
+				cell.owner.addCell(x)
+				addCell(x)
+			}
+		}
+
+		const update = (a, callback) => {
+			if(a.node == undefined) {
+				return callback(false)
+			} else {
+				if(rectangleCollision(new Rectangle(a.x, a.y, 0, 0), a.node) == false) {
+					remove(a, (removed) => {
+						if(removed) {
+							qTree.insert(a, (n) => {
+								if(!n) {
+									console.log('wtf')
+								}
+							})
+							callback(true)
+						} 
+					})
+				} else {
+					callback(false)
+				}
+			}
+		}
+
+		const remove = (a, callback) => {
+			if(a.node == undefined) {
+				return callback(false)
+			} else {
+				let index = a.node.items.indexOf(a)
+				if(index > -1) {
+					a.node.items.splice(index, 1)
+					let e = a.node 
+					e.parent != undefined && (e = e.parent)
+					let q = e.getItems()
+					e.clear()
+					for(let i = 0; i < q.length; i++) e.insert(q[i])
+					callback(true)
+					let n = e.getItems()
+					n < q && console.log('items were lost from: ', e)
+				}
+			}
+		}
+
+		
+
+		let xMouse = 0,
+			yMouse = 0
+
+		const onMousemove = (evt) => {
+			if(debugConsole) return false
+			xMouse = evt.clientX - mainWidth/2
+			yMouse = evt.clientY - mainHeight/2
+
+			testPlayer.setMouse(xMouse, yMouse)
+		} 
+		mainCanvas.onmousemove = onMousemove
+
+		let debugConsole = false
+
+		const onKeydown = (evt) => {
+			let keycode = evt.keyCode
+			if(keycode == 36) {
+				let debug = document.getElementById('debug-dialog')
+				let display = debug.style.display
+				console.log(display)
+				if(display == 'none' || !display) {
+					debug.style.display = 'block'
+					document.getElementById('debug-input').focus()
+					debugConsole = true
+					xMouse = 0
+					yMouse = 0
+				} else {
+					debug.style.display = 'none'
+					debugConsole = false
+				}
+			}
+
+			if(debugConsole) {
+				if(keycode == 13) {
+					document.getElementById('debug-input').focus()
+				}
+				return
+			}
+
+			if(evt.key == ' ') {
+				testPlayer.splitCells()
+			}
+
+			if(evt.key == 'w' && !evt.repeat) {
+				testPlayer.ejectCells()
+			}
+		} 
+		document.onkeydown = onKeydown
+
+		document.getElementById('debug-input').onkeyup = (evt) => {
+			let ele = document.getElementById('debug-input')
+			
+			const addLog = (log) => {
+				let old = document.getElementById('debug-logs').innerHTML
+				document.getElementById('debug-logs').innerHTML = `<div><pre>${log}</pre></div>` + old
+			}
+
+			if(evt.keyCode == 13) {
+				evt.preventDefault()
+				try {
+					let command = ele.value
+					if(command.trim() == '') return 
+					let arr = command.split(';')
+					let value = ''
+					switch(arr[0]) {
+						case 'clear': 
+							document.getElementById('debug-logs').innerHTML = ''
+							break
+						case 'spawn':
+							if(testPlayer.cells.length == 0) {
+								testPlayer.nickname = arr[1]
+								let c = new Cell(testPlayer, gameSize/2, gameSize/2, Math.min(100, parseInt(arr[2])) || 10)
+								testPlayer.addCell(c)
+								addCell(c)
+								addMessage('Spawned!', 5)
+								value = 'nickname=' + arr[1]
+								spectate = false
+								playing = true
+							} else {
+								value = 'already spawned'
+							}
+							break
+						case 'help':
+							addLog(
+`Commands:
+spawn;nickname;mass        - spawns player (separated with semi-colons)
+clear                      - clears console
+fps                        - logs fps
+qt=false/true              - toggles quadtree
+colors=false/true          - toggles food colors
+softbody=false/true        - toggles softbody rendering (set to false for better fps)
+rigid=false/true           - toggles rendering as circles
+spectate=false/true        - toggles spectate mode
+
+Skins: (type as nickname)
+usa, india, china, poland, trump, nazi, yaranaika, france, agrentina, doge
+More names at http://www.agarioguide.com/skins/
+
+Controls:
+mouse             - move
+spacebar          - split
+w                 - eject
+
+You can also use javascript to access game variables here.`)
+							break
+						default:
+							value = eval(command)
+					}
+
+					addLog(value)
+				} catch(err) {
+					addLog(err)
+				}
+				ele.value = ''
+			}
+		}
+
+		const setResolution = (f) => {
+			f = Math.max(100, Math.min(300, f))
+			mainCanvas.style.width = f + "%"
+		}
+
+		let qt = false
+		let softbody = true
+		let rigid = false
+		let colors = true
+		let spectate = false
+
+		const getVectorData = (x, y) => {
+			let distance = Math.hypot(x, y)
+			if(distance == 0) {
+				x = 0.0001
+				distance = 1
+			} 
+			let xNormal = x / distance
+			let yNormal = y / distance
+			let angle = Math.atan2(y, x)
+			return { x, y, 
+				distance, 
+				xNormal, 
+				yNormal,
+				angle }
+		}
+
+		const getMouse = (translateX, translateY) => {
+			return getVectorData(xMouse + translateX, 
+				yMouse + translateY)
+		}
+
+		const resolveCellCollision = (collisionData, dt) => {
+			let { maxDistance, distance } = collisionData
+			let moveDistance = maxDistance - distance
+			if(moveDistance < 0) {
+				return false
+			}
+			let { cell, referenceCell } = collisionData
+			let massTotal = cell.mass + referenceCell.mass
+			let moveCell = cell.mass / massTotal * moveDistance
+			let moveReferenceCell = referenceCell.mass / massTotal * moveDistance 
+			let { max, hypot, min } = Math
+			let s = max(hypot(cell.xBoost, cell.yBoost), hypot(referenceCell.xBoost, referenceCell.yBoost))
+			let d = max(cell.boostSpeed, referenceCell.boostSpeed) || 1
+			let v = max((1 - s / d) - 0.6, 0)
+			let { xNormal, yNormal } = collisionData
+			let t = 1 || Math.min(1, dt/480)
+			cell.x += moveReferenceCell * xNormal * v * t
+			cell.y += moveReferenceCell * yNormal * v * t
+			referenceCell.x -= moveCell * xNormal * v * t
+			referenceCell.y -= moveCell * yNormal * v * t
+		}
+
+		const getCellCollisionData = (cell, referenceCell) => {
+			let vectorData = getVectorData(cell.x - referenceCell.x, 
+				cell.y - referenceCell.y)
+			let maxDistance = cell.radius + referenceCell.radius
+			let { x, y, xNormal, yNormal, distance, angle } = vectorData
+			if(vectorData.distance < maxDistance) {
+				return { x, y, xNormal, yNormal, distance, angle, 
+					maxDistance, 
+					cell, 
+					referenceCell }
+			} else {
+				return false
+			}
+		}
+
+		const canvas = (width, height, func) => {
+			let newCanvas = document.createElement('canvas')
+			newCanvas.width = width == 0 ? 1 : width
+			newCanvas.height = height == 0 ? 1 : height 
+
+			func(newCanvas.getContext('2d'))
+			return newCanvas
+		}
+		
+		const text = (text, args) => {
+			args = args || {}
+			args.style = args.style || 'normal'
+			args.fontsize = args.fontsize || 28
+			args.weight = args.weight || 'normal'
+			args.fillColor = args.fillColor || 'white'
+			args.strokeColor = args.strokeColor || '#111'
+			args.strokeSize = args.strokeSize || 3
+			args.align = args.align || 'left'
+			args.baseline = args.baseline || 'top'
+			args.stroke = args.stroke === undefined ? true : args.stroke
+			args.varient = args.varient || 'normal'
+			args.font = args.font || 'Arial'
+
+			let { fontsize, style, weight, fillColor, strokeColor, 
+				strokeSize, align, baseline, stroke, varient, font } = args
+			const setPreferances = (ctx) => {
+				ctx.font = `${style} ${varient} ${weight} ${fontsize}px ${font}`
+				ctx.textBaseline = baseline
+				ctx.textAlign = align
+				ctx.fillStyle = fillColor
+				ctx.strokeStyle = strokeColor
+				ctx.lineWidth = strokeSize
+			}
+			setPreferances(mainCtx)
+
+			const dimensions = mainCtx.measureText(text)
+			let width = dimensions.width + strokeSize * 2
+			let height = fontsize + strokeSize * 2
+			let cvs = canvas(width, height, (ctx) => {
+				setPreferances(ctx)
+
+				let offset = strokeSize
+				stroke && ctx.strokeText(text, offset, offset)
+				ctx.fillText(text, offset, offset)
+			})
+			cvs.args = args
+			return cvs
+		}
+
+		
+
+		const grid = (fillColor, size, thickness) => {
+			return mainCtx.createPattern(canvas(size, size, (ctx) => {
+				ctx.fillStyle = fillColor
+				ctx.fillRect(size/2, 0, thickness, size)
+				ctx.fillRect(0, size/2, size, thickness)
+			}), 'repeat')
+		}
+
+		const qTree = new Quadtree(0, 0, rightPos - leftPos, bottomPos - topPos)
+		const cells = []
+		const addCell = (cell) => {
+			cells.push(cell)
+			qTree.insert(cell)
+		}
+
+		const testPlayer = new Player()
+
+		testPlayer.nickname = 'ima virgin'
+
+		const addFoods = (num) => {
+			while(num--) {
+				let cell = new Food(Math.random() * gameSize, Math.random() * gameSize, 1)
+				addCell(cell)
+			}
+		}
+
+		const addVirus = (num) => {
+			while(num--) {
+				let cell = new Virus(Math.random() * gameSize, Math.random() * gameSize, 70)
+				addCell(cell)
+			}
+		}
+
+		let bots = []
+		let names = "poland;usa;china;russia;canada;australia;spain;brazil;germany;ukraine;france;sweden;hitler;north korea;south korea;japan;united kingdom;earth;greece;latvia;lithuania;estonia;finland;norway;cia;maldivas;austria;nigeria;reddit;yaranaika;confederate;9gag;indiana;4chan;italy;bulgaria;tumblr;2ch.hk;hong kong;portugal;jamaica;german empire;mexico;sanik;switzerland;croatia;chile;indonesia;bangladesh;thailand;iran;iraq;peru;moon;botswana;bosnia;netherlands;european union;taiwan;pakistan;hungary;satanist;qing dynasty;matriarchy;patriarchy;feminism;ireland;texas;facepunch;prodota;cambodia;steam;piccolo;india;kc;denmark;quebec;ayy lmao;sealand;bait;tsarist russia;origin;vinesauce;stalin;belgium;luxembourg;stussy;prussia;8ch;argentina;scotland;sir;romania;belarus;wojak;doge;nasa;byzantium;imperial japan;french kingdom;somalia;turkey;mars;pokerface;8;irs;receita federal;facebook".split(";")
+
+
+		const addBots = (num) => {
+			while(num--) {
+				let bot = new Bot(names[Math.floor(Math.random() * names.length)])
+				let c = new Cell(bot, Math.random() * gameSize, Math.random() * gameSize, 10)
+				bot.addCell(c)
+				bots.push(bot)
+				addCell(c)
+				
+			}
+		}
+
+		addFoods(1000)
+		addVirus(50)
+		addBots(170)
+
+
+		let ordered = []
+
+		let movedCells = []
+
+		let fps = 0
+
+		let playing = false
+
+		const removeCell = (cell) => {
+			let index = cells.indexOf(cell)
+			if(index > -1) {
+				cells.splice(index, 1)
+				remove(cell, (r) => {
+					if(r) {
+						cell.isFood && addFoods(1)
+						cell.isVirus && addCell(new Virus(Math.random() * gameSize, Math.random() * gameSize, 100))
+					}
+				})
+			}
+			if(cell.owner) {
+				index = cell.owner.cells.indexOf(cell)
+				index > -1 && cell.owner.cells.splice(index, 1)
+			}
+		}
+
+		const canEat = (collisionData, combine) => {
+			let eater = collisionData.cell
+			let cell = collisionData.referenceCell
+			return (combine ? (eater.mass >= cell.mass) : (eater.mass > cell.mass * 1.25)) && collisionData.distance < eater.radius - cell.radius * 0.4
+		}
+
+		const eatCheck = (cell, a) => {
+			if(cell != a && cell.owner != a.owner) {
+				let collisionData = getCellCollisionData(cell, a)
+				if(collisionData) {
+					if(canEat(collisionData)) {
+						cell.setMass(a.mass + cell.mass)
+						removeCell(a)
+
+						if(a.isVirus) {
+							virusSplit(cell)
+						}
+					}
+				}
+			}
+		}
+
+		let leaderboard = []
+		let lbt = 0
+
+		const gameUpdate = (frames) => {
+			timestamp = Date.now()
+			if(oldtimestamp == 0) {
+				oldtimestamp = timestamp
+			}
+
+			deltatime = (timestamp - oldtimestamp)
+			oldtimestamp = timestamp
+			fps = Math.floor(1000/deltatime)
+
+			if(testPlayer.cells.length == 0 && playing) {
+				addMessage('You were eaten. Spectating.', 5)
+				spectate = true
+				playing = false
+			}
+
+			if(fps < 25 && frames > 5000) {
+				if(softbody) {
+					addMessage('FPS dropped below 25, disabled softbody rendering.', 10)
+					softbody = false
+				} else {
+					// addMessage('FPS dropped below 25 again, seems like this game needs performance improvements.', 10)
+				}
+			}
+
+			if(timestamp - lbt > 2000) {
+				lbt = timestamp
+				leaderboard = [...bots, testPlayer]
+				leaderboard = leaderboard.sort((a,b) => b.totalMass -a.totalMass)
+			}
+
+			for(let i = bots.length - 1; i >= 0; i--) {
+				let bot = bots[i]
+				if(bot.cells.length == 0) {
+					bots.splice(i, 1)
+					addBots(1)
+					break
+				}
+				bot.autoInput()
+				bot.updateCenter()
+				bot.moveCells(deltatime)
+				
+				bot.cells.forEach(cell => {
+					let t = cell.size * 4
+					qTree.query(new Rectangle(cell.x - t/2, cell.y - t/2, t, t), (a) => {
+						eatCheck(cell, a)
+					})	
+				})
+			}
+
+			testPlayer.cells.forEach(cell => {
+				let t = cell.size * 4
+				qTree.query(new Rectangle(cell.x - t/2, cell.y - t/2, t, t), (a) => {
+					eatCheck(cell, a)
+					
+				})	
+
+			})
+
+			testPlayer.updateCenter()
+			testPlayer.moveCells(deltatime)
+
+			let a = testPlayer.viewWidth
+			let b = testPlayer.viewHeight
+			let range = new Rectangle(testPlayer.xCenter - a/2, testPlayer.yCenter - b/2, a, b)
+
+			if(!spectate) {
+				viewZoom = (mainHeight) / testPlayer.viewHeight
+				viewZoom *= 2
+				let x = testPlayer.xCenter
+				let y = testPlayer.yCenter
+				xDraw = x
+				yDraw = y
+			} else {
+				viewZoom = mainHeight/(baseHeight * 0.8)
+				let mouseData = getMouse(0, 0)
+				let f = mouseData.distance/Math.min(mainHeight, mainWidth) * 2
+				let v = 10 * Math.min(1,  f)
+				xDraw += mouseData.xNormal * v
+				yDraw += mouseData.yNormal  * v
+				xDraw = Math.min(Math.max(leftPos, xDraw), rightPos)
+				yDraw = Math.min(Math.max(topPos, yDraw), bottomPos)
+
+				range = new Rectangle(xDraw - baseWidth/2, yDraw - baseHeight/2, baseWidth, baseHeight)
+			}
+
+			
+			
+
+			
+
+			cells.forEach(cell => {
+				cell.move(deltatime)
+				cell.borderCheck()
+				if(cell.isVirus) {
+					let t = cell.size * 4
+					qTree.query(new Rectangle(cell.x - t/2, cell.y - t/2, t, t), (a) => {
+						if(cell != a && a.isEject) {
+							let collisionData = getCellCollisionData(cell, a)
+							if(collisionData) {
+								if(canEat(collisionData)) {
+									cell.setMass(a.mass + cell.mass)
+									removeCell(a)
+
+									if(cell.mass >= 120) {
+										cell.setMass(70)
+										let s = new Virus(cell.x, cell.y, 70)
+										s.setBoost(a.dxBoost, a.dyBoost, s.getBoostSpeed())
+										addCell(s)
+									}
+								}
+							}
+						}
+						
+					})	
+				}
+				if(cell.isEject) {
+					let t = cell.size * 4
+
+					qTree.query(new Rectangle(cell.x - t/2, cell.y - t/2, t, t), (a) => {
+						if(a.isEject && cell != a) {
+							let collisionData = getCellCollisionData(cell, a)
+							if(collisionData) {
+								resolveCellCollision(collisionData, deltatime)
+							}
+						}
+						
+					})	
+				}
+			})
+
+			// ordered = cells
+
+			movedCells = []
+			cells.filter(cell => cell.isEject || cell.isPlayer ).forEach(cell => {
+				update(cell, (moved) => moved && movedCells.push(cell))
+			})
+
+
+			ordered = []
+			
+			qTree.query(range, (cell) => {
+				ordered.push(cell)
+			})
+
+			
+		}
+
+		let s = 1
+
+		const messageSize = 13
+		const messages = []
+		const addMessage = (t, sec) => {
+			let cache = text(t, {
+				fontsize: messageSize,
+				stroke: true,
+				weight: 'bold',
+				strokeSize: 2,
+				// style: 'small-caps',
+				font: 'Monospace'
+			})
+			messages.push(cache)
+			setTimeout(() => {
+				messages.splice(messages.indexOf(cache), 1)
+			}, sec * 1000)
+		}
+
+		addMessage('Use \'home\' key to access console. Type  \'help\' for help.', 20)
+
+		const gameDraw = () => {
+			mainCtx.clearRect(0, 0, mainWidth, mainHeight)
+			mainCtx.fillStyle = 'white'
+			mainCtx.fillRect(0, 0, mainWidth, mainHeight)
+
+			
+
+
+			s += (viewZoom - s) * 0.1
+
+			mainCtx.save()
+			mainCtx.translate(mainWidth/2, mainHeight/2)
+			mainCtx.scale(s, s)
+			mainCtx.translate(-xDraw, -yDraw)
+			
+			mainCtx.fillStyle = grid('#eee', 35, 2)
+			mainCtx.fillRect(xDraw - mainWidth/2/s, yDraw - mainHeight/2/s, mainWidth/s, mainHeight/s)
+
+			
+
+			if(qt) {
+				qTree.draw(mainCtx)
+			}
+
+
+
+			ordered = ordered.sort((a, b) => a.mass - b.mass)
+			ordered.forEach(cell => cell.draw(mainCtx))
+
+			/*mainCtx.strokeStyle = 'red'
+			mainCtx.lineWidth = 1*/
+
+			/*let a = testPlayer.viewWidth
+			let b = testPlayer.viewHeight
+			mainCtx.strokeRect(testPlayer.xCenter - a/2, testPlayer.yCenter - b/2, a, b)*/
+
+
+			mainCtx.restore()
+
+			mainCtx.fillStyle = 'rgba(0, 0, 0, 0.7)'
+
+			let y = mainHeight - 20 - messageSize
+			messages.forEach((a, i) => {
+				let w = a.width + 5
+				let h = a.height 
+				
+				mainCtx.fillRect(mainWidth/2 - w/2, y - i * (h + 2), w, h)
+				mainCtx.drawImage(a, mainWidth/2 - w/2, y - i * (h + 2), w, h)
+			})	
+
+			let m = 14
+			let w = 120
+			let h = 10 * m + 5
+			mainCtx.fillRect(mainWidth - w - 5, 5, w, h)
+			if(leaderboard.length > 0) {
+				for(let i = 0; i < 10; i++) {
+					let t = leaderboard[i].nickname 
+					if(!t) t = 'An unnamed cell'
+					mainCtx.drawImage(text(t, {
+						fontsize: m, 
+						fillColor: leaderboard[i] == testPlayer ? 'gold' : 'white'})
+					, mainWidth - w - 5, 5 + i * m)
+				}
+			}
+		}
+
+		const gameLoop = (frames) => {
+			gameUpdate(frames)
+			gameDraw(frames)
+			window.requestAnimationFrame(gameLoop)
+		}
+
+		gameLoop()
+
+	</script>
+</body>
+</html>
