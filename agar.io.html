@@ -97,7 +97,8 @@
 		}
 
 		let maxChildren = 4,
-			maxDepth = 20
+			maxDepth = 20,
+			iterations = 0
 
 		const savedSkins = {}
 		const getSkin = (nickname, callback) => {
@@ -241,10 +242,6 @@
 				}
 			}
 			movePoints() {
-				let nearby = [], t = this.size * 4
-				softbody && qTree.query(new Rectangle(this.x - t/2, this.y - t/2, t, t), (a) => {
-					nearby.push(a)
-				})	
 				this.createPoints()
 				let numpoints = this.points.length
 				let pointsacc = this.pointsAcc
@@ -269,7 +266,7 @@
 						let n = points[j].x
 						let q = points[j].y
 						let ref = points[j].ref
-						nearby.forEach(a => {
+						qTree.retrieve({ x: n, y: q }, (a) => {
 							let d = Math.hypot(a.x - n, a.y - q)
 							if(a != ref && d < a.size && d > Math.max(a.size - h, a.size * 0.8)) {
 								l = true
@@ -459,8 +456,8 @@
 						let a = this.cells[j]
 						let collisionData = getCellCollisionData(e, a)
 						if(collisionData) {
-							if(timestamp - e.splitTimestamp > e.mass * 0.3 * + 30 * 1E3 && 
-								timestamp - a.splitTimestamp > a.mass * 0.3 + 30 * 1E3) {
+							if(timestamp - e.splitTimestamp > e.mass * 0.3 * + 15 * 1E3 && 
+								timestamp - a.splitTimestamp > a.mass * 0.3 + 15 * 1E3) {
 								if(canEat(collisionData, true)) {
 									e.setMass(e.mass + a.mass)
 									// this.cells.splice(j, 1)
@@ -484,7 +481,9 @@
 			}
 			autoInput() {
 				let nearby = []
-				qTree.query(new Rectangle(this.xCenter, this.yCenter, this.viewWidth, this.viewHeight), (a) => {
+				let a = this.viewWidth
+				let b = this.viewHeight
+				qTree.query(new Rectangle(this.xCenter - a/2, this.yCenter - b/2, a, b), (a) => {
 					this.cells.indexOf(a) == -1 && nearby.push(a)
 				})
 				for(let i = 0; i < this.cells.length; i++) {
@@ -531,11 +530,15 @@
 			}
 			query(range, callback) {
 				if(rectangleCollision(this, range)) {
-					for(let i = 0; i < this.items.length; i++) callback(this.items[i])
+					for(let i = 0; i < this.items.length; i++) { 
+						callback(this.items[i])
+						iterations++
+					}
 					if(0 !== this.nodes.length) {
-						for(let j = 0; j < this.nodes.length; j++) {
-							this.nodes[j].query(range, callback)
-						}
+						this.nodes[0] && this.nodes[0].query(range, callback)
+						this.nodes[1] && this.nodes[1].query(range, callback)
+						this.nodes[2] && this.nodes[2].query(range, callback)
+						this.nodes[3] && this.nodes[3].query(range, callback)
 					}
 				}
 			}
@@ -546,8 +549,7 @@
 				}
 			}
 			findInsertNode(a) {
-				return a.x < this.x + this.w / 2 ? 
-					(a.y < this.y + this.h / 2 ? 0 : 2) : (a.y >= this.y + this.h / 2 ? 3 : 1)
+				return a.x < this.x + this.w / 2 ? (a.y < this.y + this.h / 2 ? 0 : 2) : (a.y >= this.y + this.h / 2 ? 3 : 1)
 			}
 			insert(a, callback) {
 				if(this.nodes.length != 0) {
@@ -798,7 +800,7 @@ You can also use javascript to access game variables here.`)
 		let softbody = true
 		let rigid = false
 		let colors = true
-		let spectate = false
+		let spectate = !false
 
 		const getVectorData = (x, y) => {
 			let distance = Math.hypot(x, y)
@@ -957,9 +959,9 @@ You can also use javascript to access game variables here.`)
 			}
 		}
 
-		addFoods(1000)
-		addVirus(50)
-		addBots(170)
+		addFoods(500)
+		addVirus(30)
+		addBots(100)
 
 
 		let ordered = []
@@ -1012,13 +1014,17 @@ You can also use javascript to access game variables here.`)
 		let leaderboard = []
 		let lbt = 0
 
+		let range = new Rectangle(0, 0, 0, 0)
+
 		const gameUpdate = (frames) => {
+			iterations = 0
+
 			timestamp = Date.now()
 			if(oldtimestamp == 0) {
 				oldtimestamp = timestamp
 			}
 
-			deltatime = (timestamp - oldtimestamp)
+			deltatime =  (timestamp - oldtimestamp)
 			oldtimestamp = timestamp
 			fps = Math.floor(1000/deltatime)
 
@@ -1028,14 +1034,14 @@ You can also use javascript to access game variables here.`)
 				playing = false
 			}
 
-			if(fps < 25 && frames > 5000) {
+			/*if(fps < 25 && frames > 5000) {
 				if(softbody) {
 					addMessage('FPS dropped below 25, disabled softbody rendering.', 10)
-					softbody = false
+					// softbody = false
 				} else {
 					// addMessage('FPS dropped below 25 again, seems like this game needs performance improvements.', 10)
 				}
-			}
+			}*/
 
 			if(timestamp - lbt > 2000) {
 				lbt = timestamp
@@ -1076,7 +1082,11 @@ You can also use javascript to access game variables here.`)
 
 			let a = testPlayer.viewWidth
 			let b = testPlayer.viewHeight
-			let range = new Rectangle(testPlayer.xCenter - a/2, testPlayer.yCenter - b/2, a, b)
+
+			range.x = testPlayer.xCenter - a/2
+			range.y = testPlayer.yCenter - b/2
+			range.w = a
+			range.h = b
 
 			if(!spectate) {
 				viewZoom = (mainHeight) / testPlayer.viewHeight
@@ -1089,13 +1099,16 @@ You can also use javascript to access game variables here.`)
 				viewZoom = mainHeight/(baseHeight * 0.8)
 				let mouseData = getMouse(0, 0)
 				let f = mouseData.distance/Math.min(mainHeight, mainWidth) * 2
-				let v = 10 * Math.min(1,  f)
-				xDraw += mouseData.xNormal * v
-				yDraw += mouseData.yNormal  * v
+				let v = 0.6 * Math.min(1,  f)
+				xDraw += mouseData.xNormal * v * deltatime
+				yDraw += mouseData.yNormal  * v * deltatime
 				xDraw = Math.min(Math.max(leftPos, xDraw), rightPos)
 				yDraw = Math.min(Math.max(topPos, yDraw), bottomPos)
 
-				range = new Rectangle(xDraw - baseWidth/2, yDraw - baseHeight/2, baseWidth, baseHeight)
+				range.x = xDraw - baseWidth/2
+				range.y = yDraw - baseHeight/2
+				range.w = baseWidth
+				range.h = baseHeight
 			}
 
 			
@@ -1157,8 +1170,8 @@ You can also use javascript to access game variables here.`)
 				ordered.push(cell)
 			})
 
-			
-		}
+			console.log(iterations)
+		}	
 
 		let s = 1
 
