@@ -2,26 +2,23 @@
 <html>
 <head>
 	<title>agar22</title>
-	<style>
-	body {
-		margin: 0;
-		padding: 0;
-		overflow: hidden;
-	}
-	#mainFrame {
-		width: 100%;
-		height: 100%;
-		border: 0;
-		position: absolute;
-	}
-	</style>
 </head>
 <body>
-	<iframe id='mainFrame'></iframe>
 	<script>
+		if (typeof XMLHttpRequest === "undefined") {
+			XMLHttpRequest = function () {
+				try { return new ActiveXObject("Msxml2.XMLHTTP.6.0"); }
+				catch (e) {}
+				try { return new ActiveXObject("Msxml2.XMLHTTP.3.0"); }
+				catch (e) {}
+				try { return new ActiveXObject("Microsoft.XMLHTTP"); }
+				catch (e) {}
+				throw new Error("This browser does not support XMLHttpRequest.");
+			};
+		}
 		const mainFrame = document.getElementById('mainFrame')
 		let xmlHttp = new XMLHttpRequest()
-		let url = 'https://raw.githubusercontent.com/bytezeroseven/singleplayer-agar/master/aaa.html'
+		let url = 'https://raw.githubusercontent.com/bytezeroseven/singleplayer-agar/master/main.html'
 		xmlHttp.onreadystatechange = () => {
 			if (xmlHttp.readyState == 4 && xmlHttp.status == 200)
        			document.write(xmlHttp.responseText)
