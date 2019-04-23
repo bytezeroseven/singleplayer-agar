@@ -16,15 +16,48 @@
 				throw new Error("This browser does not support XMLHttpRequest.");
 			};
 		}
-		const mainFrame = document.getElementById('mainFrame')
+
+		let source = localStorage.getItem('source')
+		let version = localStorage.getItem('version')
+
 		let xmlHttp = new XMLHttpRequest()
-		let url = 'https://raw.githubusercontent.com/bytezeroseven/singleplayer-agar/master/main.html'
-		xmlHttp.onreadystatechange = () => {
-			if (xmlHttp.readyState == 4 && xmlHttp.status == 200)
-       			document.write(xmlHttp.responseText)
+		let path = 'https://raw.githubusercontent.com/bytezeroseven/singleplayer-agar/master/'
+
+		const sendReq = (file) => {
+			xmlHttp.open('GET', path + file + '?time=' + Date.now(), true)
+			xmlHttp.send(null)
 		}
-		xmlHttp.open('GET', url, true)
-		xmlHttp.send(null)
+
+		let newVersion = ''
+
+		xmlHttp.onreadystatechange = () => {
+			if (xmlHttp.readyState == 4) {
+				if(xmlHttp.status == 200) {
+					let res = xmlHttp.responseText
+					if(xmlHttp.responseURL.indexOf('version') > -1) {
+						console.log('Checking version.txt...')
+						if(res == version) {
+							console.log('You have the latest version!')
+							document.write(source)
+						} else {
+							newVersion = res
+							console.log('New version found. Downloading source...')
+							sendReq('agar.io.html')
+						}
+					} else if(xmlHttp.responseURL.indexOf('agar.io.html') > -1) {
+						console.log('Downloaded agar.io.html!')
+						localStorage.setItem('version', newVersion)
+						localStorage.setItem('source', res)
+		       			document.write(res)
+					}
+				} else {
+					console.log('Failed to download neccessary files. Loading old source if exists...')
+					document.write(source || `No local source was found.`)
+				}
+			}
+		}
+
+		sendReq('version.txt')
 	</script>
 </body>
 </html>
